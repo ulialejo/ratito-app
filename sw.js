@@ -1,6 +1,6 @@
 const CACHE_PREFIX = 'ratito-';
-const CACHE_NAME = `${CACHE_PREFIX}v2`;
-const PRECACHE_URLS = ['./', './index.html', './styles.css', './glossary.js', './app.js', './manifest.json'];
+const CACHE_NAME = `${CACHE_PREFIX}v3`;
+const PRECACHE_URLS = ['./', './index.html', './styles.css', './glossary.js', './speech.js', './app.js', './manifest.json'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

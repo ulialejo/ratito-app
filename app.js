@@ -195,11 +195,31 @@ const MODES = {
   }
 };
 
-// ===== ESTADO =====
+
+// ===== FORMATOS =====
+// timed: usa el reloj de la sesión. auto: avanza solo al acertar (los formatos con
+// voz esperan un toque en "Siguiente", porque algunos navegadores solo dejan
+// reproducir audio después de un gesto de la persona).
+const FORMATS = {
+  palabras:  { label: 'Palabras',  icon: '🔤', timed: true,  auto: true  },
+  completar: { label: 'Completar', icon: '📝', timed: true,  auto: true  },
+  ordenar:   { label: 'Ordenar',   icon: '🧩', timed: false, auto: false },
+  escuchar:  { label: 'Escuchar',  icon: '🔊', timed: true,  auto: false },
+  hablar:    { label: 'Hablar',    icon: '🎤', timed: false, auto: false },
+};
+const SPEAK_PASS = 0.75; // proporción de palabras que tienen que salir para dar por buena la frase
+
+// ===== ESTADO (solo de la sesión: no se guarda nada) =====
 let currentMode = 'general';
+let currentFormat = 'palabras';
 let score = 0;
 let level = 1;
-let current = null;
+let current = null;          // palabra actual { es, en, opts, tip }
+let phrase = null;           // frase de ejemplo de esa palabra { ex, exEs }
+let activeFormat = 'palabras'; // formato real de la pregunta (puede caer a "palabras" si falta algo)
+let listenVariant = 'palabra'; // en Escuchar: 'palabra' o 'frase'
+let correctText = '';        // texto de la opción correcta en los formatos de elegir
+let audioText = '';          // lo que dicen los botones de audio
 let answered = false;
 let timerId = null;
 let advanceId = null;
@@ -207,6 +227,10 @@ let timeLeft = 30;
 let questionCount = 0;
 let sessionCorrect = 0;
 let sessionTotal = 0;
+let recognition = null;
+let listening = false;
+let micFailed = false;
+let order = null;            // estado del formato Ordenar
 
 const $ = (id) => document.getElementById(id);
 
@@ -249,7 +273,36 @@ function toast(msg, type = '') {
   setTimeout(() => t.classList.remove('show'), 1800);
 }
 
-// ===== RENDER MODE SELECTOR =====
+const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function phraseFor(word) {
+  const entry = typeof GLOSSARY !== 'undefined' ? GLOSSARY[word.en.toLowerCase()] : null;
+  return entry && entry.ex ? { ex: entry.ex, exEs: entry.exEs || '' } : null;
+}
+
+function blankOut(sentence, word) {
+  return sentence.replace(new RegExp(`\\b${escapeRegex(word)}\\b`, 'i'), '_____');
+}
+
+// Pregunta con hasta tres líneas: consigna, enunciado y traducción.
+function setQuestion(label, main, sub = '') {
+  const q = $('question');
+  q.replaceChildren();
+  [['q-label', label], ['q-main', main], ['q-sub', sub]].forEach(([cls, text]) => {
+    if (!text) return;
+    const line = document.createElement('span');
+    line.className = cls;
+    line.textContent = text;
+    q.appendChild(line);
+  });
+}
+
+function updateScoreboard() {
+  $('score').textContent = `Pts: ${score}`;
+  $('session-stats').textContent = `${sessionCorrect}/${sessionTotal} ✓`;
+}
+
+// ===== SELECTORES =====
 function renderModeSelector() {
   const container = $('mode-selector');
   container.innerHTML = '';
@@ -263,46 +316,98 @@ function renderModeSelector() {
   });
 }
 
-function switchMode(key) {
+function renderFormatSelector() {
+  const container = $('format-selector');
+  container.replaceChildren();
+  Object.entries(FORMATS).forEach(([key, format]) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'format-btn' + (key === currentFormat ? ' active' : '');
+    btn.dataset.format = key;
+    btn.setAttribute('aria-pressed', String(key === currentFormat));
+    const icon = document.createElement('span');
+    icon.className = 'format-icon';
+    icon.textContent = format.icon;
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = format.label;
+    btn.append(icon, label);
+    btn.addEventListener('click', () => switchFormat(key));
+    container.appendChild(btn);
+  });
+}
+
+function resetSession() {
   clearTimeout(advanceId);
   advanceId = null;
-  currentMode = key;
   questionCount = 0;
   sessionCorrect = 0;
   sessionTotal = 0;
+}
+
+function switchMode(key) {
+  resetSession();
+  currentMode = key;
   renderModeSelector();
   newQuestion();
   toast(`Modo: ${MODES[key].name}`);
 }
 
-// ===== LÓGICA PRINCIPAL =====
-function newQuestion() {
-  clearTimeout(advanceId);
-  advanceId = null;
-  answered = false;
-  const vocab = MODES[currentMode].vocab;
-  current = vocab[Math.floor(Math.random() * vocab.length)];
-  questionCount++;
-  sessionTotal++;
+function switchFormat(key) {
+  if (key === currentFormat) return;
+  if (key === 'escuchar' && !Voz.canSpeak()) {
+    toast('Este navegador no puede reproducir voz');
+    return;
+  }
+  resetSession();
+  currentFormat = key;
+  renderFormatSelector();
+  newQuestion();
+  toast(`Formato: ${FORMATS[key].label}`);
+}
 
-  $('question').textContent = `¿Cómo se dice "${current.es}" en inglés?`;
-  $('type').textContent = `${MODES[currentMode].name.split(' ')[0].toUpperCase()} | ${questionCount}`;
+// ===== VOZ: control común =====
+function stopVoice() {
+  Voz.stopSpeaking();
+  if (recognition) {
+    try { recognition.abort(); } catch { /* ya estaba parado */ }
+    recognition = null;
+  }
+  listening = false;
+  setMic(false);
+}
+
+function setMic(on) {
+  listening = on;
+  const mic = $('mic-btn');
+  mic.classList.toggle('listening', on);
+  mic.textContent = on ? '⏹ Escuchando… tocá para parar' : '🎤 Hablar';
+}
+
+// ===== LÓGICA PRINCIPAL =====
+function resetQuestionUI() {
+  stopVoice();
   $('result').classList.add('hidden');
   $('explanation').classList.add('hidden');
   $('streak-display')?.classList.add('hidden');
   $('next-btn').classList.add('hidden');
+  ['audio-controls', 'order-area', 'speak-area', 'speak-text', 'self-eval', 'options']
+    .forEach((id) => $(id).classList.add('hidden'));
+  $('options').classList.remove('options-wide');
+  $('question').classList.remove('question-anim');
+  void $('question').offsetWidth; // reinicia la animación de entrada
+  $('question').classList.add('question-anim');
+}
 
-  const opts = shuffle([...current.opts]);
-  const btns = $('options').querySelectorAll('.option');
-  btns.forEach((btn, i) => {
-    btn.textContent = opts[i];
-    btn.className = 'option';
-    btn.disabled = false;
-  });
-
+function startTimer() {
+  clearInterval(timerId);
+  timerId = null;
+  if (!FORMATS[activeFormat].timed) {
+    $('timer').textContent = '∞';
+    return;
+  }
   timeLeft = parseInt($('duration-input').value) || 30;
   $('timer').textContent = formatTime(timeLeft);
-  clearInterval(timerId);
   timerId = setInterval(() => {
     timeLeft--;
     $('timer').textContent = formatTime(timeLeft);
@@ -311,6 +416,290 @@ function newQuestion() {
       if (!answered) handleAnswer(null);
     }
   }, 1000);
+}
+
+function newQuestion() {
+  clearTimeout(advanceId);
+  advanceId = null;
+  answered = false;
+  const vocab = MODES[currentMode].vocab;
+  let next;
+  do { next = vocab[Math.floor(Math.random() * vocab.length)]; } while (vocab.length > 1 && next === current);
+  current = next;
+  phrase = phraseFor(current);
+  questionCount++;
+  sessionTotal++;
+
+  // Sin frase de ejemplo, los formatos de frases caen a Palabras para esa pregunta.
+  activeFormat = currentFormat !== 'palabras' && !phrase ? 'palabras' : currentFormat;
+
+  resetQuestionUI();
+  $('type').textContent = `${MODES[currentMode].name.split(' ')[0].toUpperCase()} · ${FORMATS[currentFormat].label.toUpperCase()} | ${questionCount}`;
+
+  if (activeFormat === 'ordenar') startOrder();
+  else if (activeFormat === 'hablar') startSpeak();
+  else startChoice();
+  startTimer();
+}
+
+// ----- Formatos de elegir: Palabras, Completar y Escuchar -----
+function setChoices(options, wide = false) {
+  const area = $('options');
+  area.classList.remove('hidden');
+  area.classList.toggle('options-wide', wide);
+  area.querySelectorAll('.option').forEach((btn, i) => {
+    btn.textContent = options[i];
+    btn.className = 'option';
+    btn.disabled = false;
+  });
+}
+
+function startChoice() {
+  if (activeFormat === 'completar') {
+    correctText = current.en;
+    setQuestion('Completá la frase', blankOut(phrase.ex, current.en), phrase.exEs);
+    setChoices(shuffle([...current.opts]));
+    return;
+  }
+  if (activeFormat === 'escuchar') {
+    $('audio-controls').classList.remove('hidden');
+    const distractors = shuffle(MODES[currentMode].vocab.filter((v) => v !== current))
+      .map(phraseFor)
+      .filter((p) => p && p.exEs && p.exEs !== phrase.exEs)
+      .slice(0, 3)
+      .map((p) => p.exEs);
+    listenVariant = distractors.length === 3 && Math.random() < 0.5 ? 'frase' : 'palabra';
+    if (listenVariant === 'frase') {
+      correctText = phrase.exEs;
+      audioText = phrase.ex;
+      setQuestion('Escuchá la frase', '¿Qué significa?');
+      setChoices(shuffle([phrase.exEs, ...distractors]), true);
+    } else {
+      correctText = current.en;
+      audioText = current.en;
+      setQuestion('Escuchá y elegí', '¿Qué palabra dijo?');
+      setChoices(shuffle([...current.opts]));
+    }
+    Voz.speak(audioText);
+    return;
+  }
+  correctText = current.en;
+  setQuestion('', `¿Cómo se dice "${current.es}" en inglés?`);
+  setChoices(shuffle([...current.opts]));
+}
+
+// ----- Ordenar -----
+function startOrder() {
+  const ending = (phrase.ex.match(/[.?!]+$/) || [''])[0];
+  const words = phrase.ex.slice(0, phrase.ex.length - ending.length).split(/\s+/).filter(Boolean);
+  const bank = words.map((text, id) => ({ id, text }));
+  for (let tries = 0; tries < 8; tries++) {
+    shuffle(bank);
+    if (bank.some((chip, i) => chip.text !== words[i])) break;
+  }
+  order = { words, ending, bank, placed: [], done: false };
+  setQuestion('Armá la frase en inglés', `“${phrase.exEs}”`);
+  $('order-area').classList.remove('hidden');
+  renderOrder();
+}
+
+function makeChip(chip, onClick, state = '') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `chip ${state}`.trim();
+  btn.textContent = chip.text;
+  btn.disabled = order.done;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function renderOrder() {
+  const answerArea = $('order-answer');
+  const bankArea = $('order-bank');
+  answerArea.replaceChildren();
+  bankArea.replaceChildren();
+  if (!order.placed.length) {
+    const hint = document.createElement('span');
+    hint.className = 'order-hint';
+    hint.textContent = 'Tocá las palabras en orden';
+    answerArea.appendChild(hint);
+  }
+  order.placed.forEach((id, position) => {
+    const chip = order.bank.find((c) => c.id === id);
+    let state = 'placed';
+    if (order.done) state += chip.text.toLowerCase() === order.words[position].toLowerCase() ? ' ok' : ' bad';
+    answerArea.appendChild(makeChip(chip, () => {
+      order.placed = order.placed.filter((x) => x !== id);
+      renderOrder();
+    }, state));
+  });
+  order.bank.filter((c) => !order.placed.includes(c.id)).forEach((chip) => {
+    bankArea.appendChild(makeChip(chip, () => {
+      order.placed.push(chip.id);
+      renderOrder();
+    }));
+  });
+  $('order-check').disabled = order.done || order.placed.length !== order.words.length;
+  $('order-clear').disabled = order.done || !order.placed.length;
+}
+
+function checkOrder() {
+  if (answered || !order || order.placed.length !== order.words.length) return;
+  answered = true;
+  order.done = true;
+  const attempt = order.placed.map((id) => order.bank.find((c) => c.id === id).text);
+  const correct = attempt.join(' ').toLowerCase() === order.words.join(' ').toLowerCase();
+  renderOrder();
+  const exp = $('explanation');
+  if (correct) {
+    awardCorrect();
+    showPhraseExplanation(exp, '✓ ');
+    exp.className = 'explanation success';
+  } else {
+    $('result').textContent = 'Casi. Así queda la frase:';
+    $('result').className = 'error';
+    showPhraseExplanation(exp, '');
+    exp.className = 'explanation error';
+    vibrate([100, 50, 100]);
+  }
+  finishAnswerUI();
+}
+
+// ----- Hablar -----
+function startSpeak() {
+  audioText = phrase.ex;
+  setQuestion('Decilo en inglés', `“${phrase.exEs}”`);
+  $('speak-area').classList.remove('hidden');
+  $('audio-controls').classList.toggle('hidden', !Voz.canSpeak());
+  const text = $('speak-text');
+  text.replaceChildren();
+  $('reveal-btn').classList.remove('hidden');
+  const canListen = Voz.canListen();
+  $('mic-btn').classList.toggle('hidden', !canListen);
+  $('privacy-note').classList.toggle('hidden', !canListen);
+  $('self-eval').classList.toggle('hidden', canListen);
+  setStatus(canListen
+    ? 'Escuchá el modelo y tocá 🎤 para decirlo.'
+    : 'Tu navegador no reconoce voz: escuchá el modelo, decilo en voz alta y marcá cómo te salió.');
+}
+
+function setStatus(message) {
+  $('speak-status').textContent = message;
+}
+
+// Muestra la frase; con "hits" pinta en verde lo que salió y en rojo lo que faltó.
+function showSpeakText(hits = null) {
+  const text = $('speak-text');
+  text.replaceChildren();
+  const tokens = phrase.ex.split(/\s+/);
+  const usable = hits && hits.length === tokens.length;
+  tokens.forEach((token, i) => {
+    const word = document.createElement('span');
+    word.className = 'speak-word' + (usable ? (hits[i] ? ' hit' : ' miss') : '');
+    word.textContent = token;
+    text.append(word, ' ');
+  });
+  text.classList.remove('hidden');
+  $('reveal-btn').classList.add('hidden');
+}
+
+function toggleMic() {
+  if (listening && recognition) {
+    recognition.stop();
+    return;
+  }
+  stopVoice();
+  micFailed = false;
+  setStatus('Preparando el micrófono…');
+  recognition = Voz.listen({
+    onStart: () => { setMic(true); setStatus('Escuchando… decí la frase completa.'); },
+    onResult: handleSpoken,
+    onError: handleMicError,
+    onEnd: (heard) => {
+      setMic(false);
+      if (!heard && !micFailed) setStatus('No te escuché. Probá de nuevo, más cerca del micrófono.');
+    },
+  });
+  if (!recognition) {
+    setMic(false);
+    handleMicError('start');
+  }
+}
+
+function handleSpoken(alternatives) {
+  const result = Voz.bestMatch(phrase.ex, alternatives);
+  const total = result.words.length;
+  const said = result.hits.filter(Boolean).length;
+  showSpeakText(result.hits);
+  if (result.ratio >= SPEAK_PASS) {
+    setStatus(`Escuché: “${result.heard}” · ${said} de ${total} palabras.`);
+    if (!answered) {
+      answered = true;
+      awardCorrect();
+      showPhraseExplanation($('explanation'), '✓ ');
+      $('explanation').className = 'explanation success';
+      finishAnswerUI();
+    }
+  } else {
+    setStatus(`Escuché: “${result.heard || '…'}” · ${said} de ${total} palabras. Probá de nuevo o seguí.`);
+    $('next-btn').classList.remove('hidden');
+  }
+}
+
+function handleMicError(code) {
+  micFailed = true;
+  setMic(false);
+  const messages = {
+    'not-allowed': 'No tengo permiso para usar el micrófono. Activalo en los ajustes del navegador, o marcá vos cómo te salió.',
+    'service-not-allowed': 'El navegador no deja usar el reconocimiento de voz. Marcá vos cómo te salió.',
+    'network': 'El reconocimiento de voz necesita conexión. Marcá vos cómo te salió.',
+    'audio-capture': 'No encuentro un micrófono. Marcá vos cómo te salió.',
+    'no-speech': 'No te escuché. Probá de nuevo, más cerca del micrófono.',
+    'aborted': '',
+  };
+  const message = code in messages ? messages[code] : 'No pude reconocer tu voz. Marcá vos cómo te salió.';
+  if (message) setStatus(message);
+  if (code !== 'no-speech' && code !== 'aborted') $('self-eval').classList.remove('hidden');
+}
+
+// ===== RESPUESTAS =====
+function awardCorrect() {
+  score += 10;
+  sessionCorrect++;
+  $('result').textContent = '¡Correcto! +10 pts';
+  $('result').className = 'success';
+  if ($('confetti-toggle').checked) confetti();
+  vibrate([30, 20, 30]);
+  if (score >= level * 50) { level++; $('level').textContent = `Nivel: ${level}`; }
+}
+
+function finishAnswerUI() {
+  $('result').classList.remove('hidden');
+  $('explanation').classList.remove('hidden');
+  updateScoreboard();
+  const wasCorrect = $('result').classList.contains('success');
+  if (wasCorrect && FORMATS[activeFormat].auto) advanceId = setTimeout(newQuestion, 900);
+  else $('next-btn').classList.remove('hidden');
+}
+
+function showPhraseExplanation(exp, prefix = '') {
+  exp.replaceChildren();
+  const block = document.createElement('div');
+  block.className = 'explanation-word';
+  const title = document.createElement('strong');
+  title.lang = 'en';
+  title.textContent = `${prefix}${phrase.ex}`;
+  block.appendChild(title);
+  if (phrase.exEs) {
+    const translation = document.createElement('p');
+    translation.className = 'explanation-translation';
+    translation.textContent = phrase.exEs;
+    block.appendChild(translation);
+  }
+  exp.appendChild(block);
+  const tip = document.createElement('em');
+  tip.textContent = `${current.en} = ${current.es}${current.tip ? ' · ' + current.tip : ''}`;
+  exp.appendChild(tip);
 }
 
 function showAnswerExplanation(exp, chosen, fallbackTip = '') {
@@ -349,48 +738,40 @@ function showAnswerExplanation(exp, chosen, fallbackTip = '') {
   exp.appendChild(tip);
 }
 
+// Los formatos donde las opciones son palabras explican con la palabra; los de frase, con la frase.
+const explainsWithPhrase = () => activeFormat === 'escuchar' && listenVariant === 'frase';
+
 function handleAnswer(btn) {
   if (answered) return;
   answered = true;
   clearInterval(timerId);
+  stopVoice();
 
-  const isCorrect = btn && btn.textContent === current.en;
-  const allBtns = $('options').querySelectorAll('.option');
-
-  allBtns.forEach(b => {
+  const isCorrect = !!btn && btn.textContent === correctText;
+  $('options').querySelectorAll('.option').forEach((b) => {
     b.disabled = true;
-    if (b.textContent === current.en) b.classList.add('correct');
+    if (b.textContent === correctText) b.classList.add('correct');
     else if (b === btn) b.classList.add('wrong');
   });
 
-  // Explicación SIEMPRE (acierto o error)
   const exp = $('explanation');
   if (isCorrect) {
-    score += 10;
-    sessionCorrect++;
-    $('result').textContent = `¡Correcto! +10 pts`;
-    $('result').className = 'success';
-    exp.innerHTML = `<strong>✓ ${current.en}</strong> = "${current.es}"`;
+    awardCorrect();
+    if (activeFormat === 'palabras') {
+      exp.innerHTML = `<strong>✓ ${current.en}</strong> = "${current.es}"`;
+    } else {
+      showPhraseExplanation(exp, '✓ ');
+    }
     exp.className = 'explanation success';
-    if ($('confetti-toggle').checked) confetti();
-    vibrate([30, 20, 30]);
-    if (score >= level * 50) { level++; $('level').textContent = `Nivel: ${level}`; }
-    // Dar tiempo a leer el resultado antes de avanzar.
-    advanceId = setTimeout(newQuestion, 900);
   } else {
-    $('result').textContent = `Incorrecto. Era "${current.en}"`;
+    $('result').textContent = explainsWithPhrase() ? 'Incorrecto. Era esta frase:' : `Incorrecto. Era "${correctText}"`;
     $('result').className = 'error';
-    showAnswerExplanation(exp, btn ? btn.textContent : null, 'Repasá esta palabra.');
+    if (explainsWithPhrase()) showPhraseExplanation(exp, '');
+    else showAnswerExplanation(exp, btn ? btn.textContent : null, 'Repasá esta palabra.');
     exp.className = 'explanation error';
     vibrate([100, 50, 100]);
-    // Mostrar botón "Siguiente" para que avance cuando quiera
-    $('next-btn').classList.remove('hidden');
   }
-
-  $('result').classList.remove('hidden');
-  exp.classList.remove('hidden');
-  $('score').textContent = `Pts: ${score}`;
-  $('session-stats').textContent = `${sessionCorrect}/${sessionTotal} ✓`;
+  finishAnswerUI();
 }
 
 function nextQuestion() {
@@ -405,17 +786,28 @@ function skipQuestion() {
   if (answered) { newQuestion(); return; }
   answered = true;
   clearInterval(timerId);
-  $('result').textContent = `Saltado. Era "${current.en}"`;
+  stopVoice();
+
+  const byPhrase = ['ordenar', 'hablar'].includes(activeFormat) || explainsWithPhrase();
+  $('result').textContent = `Saltado. Era "${byPhrase ? phrase.ex : correctText}"`;
   $('result').className = 'error';
   $('result').classList.remove('hidden');
   const exp = $('explanation');
-  showAnswerExplanation(exp, null);
+  if (byPhrase) showPhraseExplanation(exp, '');
+  else showAnswerExplanation(exp, null);
   exp.className = 'explanation error';
   exp.classList.remove('hidden');
-  $('options').querySelectorAll('.option').forEach(b => {
+  $('options').querySelectorAll('.option').forEach((b) => {
     b.disabled = true;
-    if (b.textContent === current.en) b.classList.add('correct');
+    if (b.textContent === correctText) b.classList.add('correct');
   });
+  if (activeFormat === 'ordenar' && order) {
+    order.done = true;
+    order.bank = order.words.map((text, id) => ({ id, text })); // se arma sola la frase correcta para verla
+    order.placed = order.bank.map((c) => c.id);
+    renderOrder();
+  }
+  if (activeFormat === 'hablar') showSpeakText();
   $('next-btn').classList.remove('hidden');
   vibrate([50]);
 }
@@ -429,6 +821,33 @@ $('options').addEventListener('click', (e) => {
 $('skip-btn').addEventListener('click', skipQuestion);
 $('next-btn').addEventListener('click', nextQuestion);
 
+$('play-btn').addEventListener('click', () => Voz.speak(audioText));
+$('slow-btn').addEventListener('click', () => Voz.speak(audioText, { slow: true }));
+$('reveal-btn').addEventListener('click', () => showSpeakText());
+$('mic-btn').addEventListener('click', toggleMic);
+$('self-ok').addEventListener('click', () => {
+  if (answered) return;
+  answered = true;
+  showSpeakText();
+  awardCorrect();
+  showPhraseExplanation($('explanation'), '✓ ');
+  $('explanation').className = 'explanation success';
+  finishAnswerUI();
+});
+$('self-retry').addEventListener('click', () => {
+  showSpeakText();
+  setStatus('Escuchá el modelo otra vez y probá de nuevo.');
+  Voz.speak(audioText);
+});
+$('order-clear').addEventListener('click', () => {
+  if (!order || order.done) return;
+  order.placed = [];
+  renderOrder();
+});
+$('order-check').addEventListener('click', checkOrder);
+
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopVoice(); });
+
 $('settings-btn').addEventListener('click', () => $('settings-panel').classList.remove('hidden'));
 $('close-settings').addEventListener('click', () => $('settings-panel').classList.add('hidden'));
 
@@ -439,6 +858,7 @@ $('duration-input').addEventListener('change', () => {
 
 // ===== INICIO =====
 renderModeSelector();
+renderFormatSelector();
 newQuestion();
 
 // ===== USO SIN CONEXIÓN =====

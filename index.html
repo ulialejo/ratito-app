@@ -17,6 +17,7 @@
 
     <!-- SELECTOR DE MODO -->
     <div id="mode-selector" class="mode-selector"></div>
+    <div id="format-selector" class="format-selector" role="group" aria-label="Formato de práctica"></div>
 
     <div id="session-info">
       <span id="timer">00:30</span>
@@ -25,6 +26,36 @@
 
     <div id="question-container">
       <div id="question" class="question-anim">¿Cuál es la palabra en inglés para "..."?</div>
+
+      <!-- Escuchar y Hablar: reproducir el modelo en inglés -->
+      <div id="audio-controls" class="audio-controls hidden">
+        <button type="button" id="play-btn" class="audio-btn">🔊 Escuchar</button>
+        <button type="button" id="slow-btn" class="audio-btn">🐢 Más lento</button>
+      </div>
+
+      <!-- Ordenar: armar la frase tocando las palabras -->
+      <div id="order-area" class="order-area hidden">
+        <div id="order-answer" class="order-answer" aria-label="Tu frase"></div>
+        <div id="order-bank" class="order-bank" aria-label="Palabras disponibles"></div>
+        <div class="order-actions">
+          <button type="button" id="order-clear" class="ghost-btn">Borrar</button>
+          <button type="button" id="order-check" class="primary-btn" disabled>Comprobar</button>
+        </div>
+      </div>
+
+      <!-- Hablar: decir la frase en voz alta -->
+      <div id="speak-area" class="speak-area hidden">
+        <p id="speak-text" class="speak-text hidden" lang="en"></p>
+        <button type="button" id="reveal-btn" class="ghost-btn">👁 Ver cómo se escribe</button>
+        <button type="button" id="mic-btn" class="mic-btn">🎤 Hablar</button>
+        <p id="speak-status" class="speak-status" role="status" aria-live="polite"></p>
+        <div id="self-eval" class="self-eval hidden">
+          <button type="button" id="self-ok" class="primary-btn">Me salió ✓</button>
+          <button type="button" id="self-retry" class="ghost-btn">Otra vez</button>
+        </div>
+        <p id="privacy-note" class="privacy-note">🔒 Para reconocer tu voz, el navegador envía el audio a su servicio de voz (por ejemplo Google en Chrome o Apple en iPhone) y necesita conexión. Ratito no lo graba ni lo guarda.</p>
+      </div>
+
       <div id="options" class="options-anim">
         <button class="option">apple</button>
         <button class="option">banana</button>
@@ -50,12 +81,14 @@
     <label><input type="checkbox" id="sound-toggle" checked> Vibración</label>
     <label><input type="checkbox" id="confetti-toggle" checked> Confeti</label>
     <label><input type="number" id="duration-input" min="15" max="120" value="30"> Duración (seg)</label>
+    <p class="settings-note">El tiempo aplica a Palabras, Completar y Escuchar. Ordenar y Hablar no tienen reloj.</p>
     <button id="close-settings">Cerrar</button>
   </div>
 
   <div id="toast" class="toast hidden"></div>
 
   <script src="glossary.js"></script>
+  <script src="speech.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
