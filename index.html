@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="description" content="Aprender inglés en sesiones rápidas de 30 segundos">
+  <title>Ratito - Inglés en ratitos</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐭</text></svg>">
+  <meta name="theme-color" content="#22d3ee">
+  <meta name="robots" content="noindex, nofollow">
+</head>
+<body>
+  <div id="app">
+    <h1>Ratito 🐭</h1>
+
+    <!-- SELECTOR DE MODO -->
+    <div id="mode-selector" class="mode-selector"></div>
+
+    <div id="session-info">
+      <span id="timer">00:30</span>
+      <span id="type">GENERAL | 1</span>
+    </div>
+
+    <div id="question-container">
+      <div id="question" class="question-anim">¿Cuál es la palabra en inglés para "..."?</div>
+      <div id="options" class="options-anim">
+        <button class="option">apple</button>
+        <button class="option">banana</button>
+        <button class="option">cherry</button>
+        <button class="option">date</button>
+      </div>
+    </div>
+
+    <div id="result" class="hidden">¡Correcto! +10 pts</div>
+    <div id="explanation" class="explanation hidden"></div>
+
+    <button id="skip-btn" class="skip-btn">Saltar ❌</button>
+    <button id="next-btn" class="next-btn hidden">Siguiente →</button>
+
+    <div id="score">Pts: 0</div>
+    <div id="session-stats" class="session-stats">0/0 ✓</div>
+    <div id="level">Nivel: 1</div>
+    <button id="settings-btn">⚙️</button>
+  </div>
+
+  <div id="settings-panel" class="hidden">
+    <h3>Configuración</h3>
+    <label><input type="checkbox" id="sound-toggle" checked> Vibración</label>
+    <label><input type="checkbox" id="confetti-toggle" checked> Confeti</label>
+    <label><input type="number" id="duration-input" min="15" max="120" value="30"> Duración (seg)</label>
+    <button id="close-settings">Cerrar</button>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="glossary.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
